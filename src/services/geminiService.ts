@@ -2,13 +2,32 @@ import { GoogleGenAI, ThinkingLevel, Type, Modality } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
+// Electron API Type Definition
+declare global {
+  interface Window {
+    electronAPI: {
+      getSystemStats: () => Promise<any>;
+      runLocalCommand: (command: string) => Promise<any>;
+      localInference: (data: { url: string; method: string; body: any }) => Promise<any>;
+      searchWeb: (query: string) => Promise<any>;
+      openExternal: (url: string) => Promise<void>;
+      showItemInFolder: (path: string) => Promise<void>;
+      saveLocalData: (filename: string, data: any) => Promise<string>;
+      readLocalData: (filename: string) => Promise<any>;
+      isElectron: boolean;
+    };
+  }
+}
+
 export type ModelType = 
   | "gemini-3.1-pro-preview" 
   | "gemini-3-flash-preview" 
   | "gemini-3.1-flash-lite-preview"
   | "gemini-3.1-flash-image-preview"
   | "gemini-3-pro-image-preview"
-  | "veo-3.1-lite-generate-preview";
+  | "veo-3.1-lite-generate-preview"
+  | "local-llama-3"
+  | "local-mistral";
 
 export interface GenerationResult {
   text?: string;
@@ -34,6 +53,7 @@ export interface SystemMetrics {
   cpu: number;
   gpu: number;
   memory: number;
+  temp?: number;
   activeModels: number;
   onDeviceModels: {
     name: string;
@@ -64,12 +84,10 @@ export const MODEL_CATALOG: CatalogModel[] = [
 export const MODELS = [
   { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", type: "text", description: "Complex reasoning & coding" },
   { id: "gemini-3-flash-preview", name: "Gemini 3 Flash", type: "text", description: "Fast & efficient" },
-  { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Lite", type: "text", description: "Low latency" },
+  { id: "local-llama-3", name: "Llama 3 (Local)", type: "text", description: "On-device GGUF via Ollama" },
+  { id: "local-mistral", name: "Mistral (Local)", type: "text", description: "On-device GGUF via Ollama" },
   { id: "gemini-3.1-flash-image-preview", name: "Gemini 3.1 Image", type: "image", description: "High-quality image gen" },
-  { id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro Image", type: "image", description: "Studio-quality images" },
   { id: "veo-3.1-lite-generate-preview", name: "Veo 3.1 Lite", type: "video", description: "Video generation" },
-  { id: "local-llama-3-8b", name: "Llama 3 8B (Local)", type: "text", description: "On-device GGUF" },
-  { id: "local-mistral-7b-lora", name: "Mistral 7B + LoRA", type: "text", description: "Fine-tuned local model" },
   { id: "tripo-3d-gen", name: "Tripo 3D", type: "3d", description: "Prompt/Image to 3D" },
 ];
 
@@ -85,7 +103,19 @@ export function getMockMetrics() {
   };
 }
 
-export function getSystemStatus(): SystemMetrics {
+export async function getSystemStatus(): Promise<SystemMetrics> {
+  if (window.electronAPI) {
+    const stats = await window.electronAPI.getSystemStats();
+    return {
+      ...stats,
+      activeModels: 2,
+      onDeviceModels: [
+        { name: "Llama-3-8B-Instruct", status: "running", type: "GGUF", vram: "5.4 GB" },
+        { name: "Mistral-7B-v0.3", status: "idle", type: "LoRA", vram: "4.2 GB" },
+      ]
+    };
+  }
+
   return {
     cpu: Math.floor(Math.random() * 100),
     gpu: Math.floor(Math.random() * 100),
@@ -99,16 +129,72 @@ export function getSystemStatus(): SystemMetrics {
   };
 }
 
-export async function generateText(prompt: string, model: ModelType = "gemini-3-flash-preview"): Promise<string> {
+export async function generateText(prompt: string, model: ModelType = "gemini-3-flash-preview", internetSearch: boolean = false): Promise<string> {
+  let context = "";
+
+  // Autonomous Internet Search
+  if (internetSearch && window.electronAPI) {
+    const searchResult = await window.electronAPI.searchWeb(prompt);
+    if (searchResult.abstract) {
+      context = `\n\n[Internet Search Context]: ${searchResult.abstract}\nSources: ${searchResult.source}\nRelated: ${searchResult.related.join(", ")}\n\n`;
+    }
+  }
+
+  const finalPrompt = context ? `Using the following search context, answer the user prompt.\n${context}\nUser Prompt: ${prompt}` : prompt;
+
+  // Local Inference Path
+  if (window.electronAPI && (model === "local-llama-3" || model === "local-mistral")) {
+    const localModelName = model === "local-llama-3" ? "llama3" : "mistral";
+    const result = await window.electronAPI.localInference({
+      url: "http://localhost:11434/api/generate",
+      method: "POST",
+      body: {
+        model: localModelName,
+        prompt: finalPrompt,
+        stream: false
+      }
+    });
+    return result.response || "Local model failed to respond. Ensure Ollama is running.";
+  }
+
+  // Cloud Path
   try {
     const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
+      model: model.startsWith("local") ? "gemini-3-flash-preview" : model,
+      contents: finalPrompt,
     });
     return response.text || "No response generated.";
   } catch (error) {
     console.error("Text generation error:", error);
     return `Error: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+export async function selfEvolve(userInteractions: any[]): Promise<any> {
+  const evolutionPrompt = `
+    Analyze these user interactions and system metrics. 
+    Suggest one "Evolutionary Update" for the OmniSandbox AI.
+    The update should be one of:
+    1. A new UI feature or UX mode.
+    2. An efficiency optimization (e.g., "Switch to 4-bit quantization for Llama-3").
+    3. A new recommended use case based on user behavior.
+
+    Interactions: ${JSON.stringify(userInteractions.slice(-5))}
+    
+    Return JSON: { "id": "unique-id", "title": "Update Title", "description": "What it does", "code": "Implementation snippet", "category": "UI|Efficiency|Feature" }
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: evolutionPrompt,
+      config: {
+        responseMimeType: "application/json",
+      }
+    });
+    return JSON.parse(response.text || "{}");
+  } catch (e) {
+    return null;
   }
 }
 
@@ -138,6 +224,13 @@ export async function generateImage(prompt: string, options: { aspectRatio: stri
 }
 
 export async function judgeAndRoute(prompt: string): Promise<{ model: ModelType; reason: string }> {
+  // If in Electron, we can prefer local models for simple tasks
+  if (window.electronAPI) {
+    if (prompt.length < 100 && !prompt.toLowerCase().includes("code")) {
+      return { model: "local-llama-3", reason: "Simple query routed to local engine for privacy and speed." };
+    }
+  }
+
   const routerPrompt = `
     Analyze the following user prompt and decide which AI model is best suited for it.
     Available models:

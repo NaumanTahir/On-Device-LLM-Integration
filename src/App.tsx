@@ -47,7 +47,9 @@ import {
   Play,
   User,
   Map as MapIcon,
-  Search
+  Search,
+  GripVertical,
+  Loader2
 } from "lucide-react";
 
 import { 
@@ -62,7 +64,61 @@ import {
   Area
 } from 'recharts';
 
+import { DndContext, useDraggable, useDroppable, DragOverlay, type DragEndEvent } from '@dnd-kit/core';
+
 import { Button, buttonVariants } from "@/components/ui/button";
+
+function DraggableResult({ id, children }: { id: string, children: React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id });
+  const style = transform ? {
+    transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
+    zIndex: 1000,
+    opacity: isDragging ? 0.5 : 1,
+  } : undefined;
+
+  return (
+    <div ref={setNodeRef} style={style} className="relative group">
+      <div {...listeners} {...attributes} className="absolute -left-3 top-4 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing p-1 bg-background border rounded shadow-sm z-20 transition-opacity">
+        <GripVertical size={14} className="text-muted-foreground" />
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function DroppableRoom({ id, room, concept, memories, isDragging }: { id: string, room: string, concept: string, memories: number, isDragging: boolean, key?: React.Key }) {
+  const { setNodeRef, isOver } = useDroppable({ id });
+  
+  return (
+    <div 
+      ref={setNodeRef}
+      className={cn(
+        "p-4 rounded-lg border transition-all cursor-pointer",
+        isOver ? "border-amber-500 bg-amber-500/20 scale-[1.02] shadow-lg" : "bg-muted/20 border-border/50 hover:border-amber-500/50",
+        isDragging && !isOver ? "border-amber-500/50 bg-amber-500/10 ring-2 ring-amber-500/20 animate-pulse" : ""
+      )}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className={cn(
+            "w-10 h-10 rounded flex items-center justify-center transition-colors",
+            isOver ? "bg-amber-500 text-white" : "bg-amber-500/10 text-amber-500"
+          )}>
+            <MapIcon size={20} />
+          </div>
+          <div>
+            <p className="text-sm font-bold">{room}</p>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-widest">{concept}</p>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className={cn("text-xs font-mono font-bold", isOver ? "text-white" : "text-amber-500")}>{memories}</p>
+          <p className="text-[9px] text-muted-foreground uppercase">Nodes</p>
+        </div>
+      </div>
+    </div>
+  );
+}
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -84,6 +140,7 @@ import {
   generateText, 
   generateImage, 
   judgeAndRoute, 
+  selfEvolve,
   MODELS, 
   ModelType, 
   GenerationResult,
@@ -122,6 +179,13 @@ export default function App() {
     datasetName: "customer_support_v1.jsonl"
   });
   const [activeTab, setActiveTab] = useState("chat");
+  const [isTraining, setIsTraining] = useState(false);
+  const [trainingProgress, setTrainingProgress] = useState(0);
+  const [datasetPreview, setDatasetPreview] = useState([
+    { prompt: "How do I reset my password?", completion: "To reset your password, go to settings and click 'Security'." },
+    { prompt: "What is the return policy?", completion: "Our return policy allows returns within 30 days of purchase." },
+    { prompt: "Can I upgrade my plan?", completion: "Yes, you can upgrade your plan at any time from the billing dashboard." },
+  ]);
   const [systemStatus, setSystemStatus] = useState(getSystemStatus());
   const [metricsHistory, setMetricsHistory] = useState<any[]>([]);
   const [internetSearch, setInternetSearch] = useState(false);
@@ -152,6 +216,26 @@ export default function App() {
     { id: "flux-1-schnell", name: "Flux.1 Schnell", reason: "To speed up your high-frequency image generation workflows." },
   ]);
 
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveDragId(null);
+    
+    if (over && over.id.toString().startsWith('room-')) {
+      const roomId = parseInt(over.id.toString().replace('room-', ''));
+      const resultIdx = parseInt(active.id.toString().replace('result-', ''));
+      
+      setMemoryPalace(prev => prev.map(room => 
+        room.id === roomId ? { ...room, memories: room.memories + 1 } : room
+      ));
+      
+      toast.success("Categorized in Memory", { 
+        description: `Result added to ${memoryPalace.find(r => r.id === roomId)?.room}` 
+      });
+    }
+  };
+
   useEffect(() => {
     let idleTimer: any;
     const handleActivity = () => {
@@ -178,18 +262,22 @@ export default function App() {
   }, [isIdle]);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setSystemStatus(getSystemStatus());
+    const updateMetrics = async () => {
+      const status = await getSystemStatus();
+      setSystemStatus(status);
       setMetricsHistory(prev => {
         const newPoint = {
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          cpu: Math.floor(Math.random() * 30) + 20,
-          gpu: Math.floor(Math.random() * 50) + 30,
-          memory: Math.floor(Math.random() * 20) + 60,
+          cpu: status.cpu,
+          gpu: status.gpu,
+          memory: status.memory,
         };
         return [...prev.slice(-19), newPoint];
       });
-    }, 3000);
+    };
+
+    const interval = setInterval(updateMetrics, 3000);
+    updateMetrics();
     return () => clearInterval(interval);
   }, []);
 
@@ -225,7 +313,7 @@ export default function App() {
         // Parallel execution for text models
         const textModels: ModelType[] = ["gemini-3.1-pro-preview", "gemini-3-flash-preview"];
         const parallelPromises = textModels.map(async (m) => {
-          const text = await generateText(prompt, m);
+          const text = await generateText(prompt, m, internetSearch);
           return { 
             text, 
             model: m, 
@@ -273,7 +361,7 @@ export default function App() {
         };
         setResults(prev => [...prev, result]);
       } else {
-        const text = await generateText(prompt, targetModel);
+        const text = await generateText(prompt, targetModel, internetSearch);
         const result = { 
           text, 
           model: targetModel, 
@@ -282,6 +370,17 @@ export default function App() {
           internetSearch
         };
         setResults(prev => [...prev, result]);
+
+        // Trigger Autonomous Evolution check
+        if (results.length > 0 && results.length % 3 === 0) {
+          const evolution = await selfEvolve([...results, result]);
+          if (evolution && !evolutionSuggestions.find(s => s.id === evolution.id)) {
+            setEvolutionSuggestions(prev => [evolution, ...prev]);
+            toast.success("New Evolution Proposal", { 
+              description: `The engine has suggested a new ${evolution.category} update: ${evolution.title}` 
+            });
+          }
+        }
       }
 
       setPrompt("");
@@ -302,9 +401,46 @@ export default function App() {
   };
 
   return (
-    <TooltipProvider>
-      <div className="flex h-screen bg-background overflow-hidden font-sans">
+    <DndContext onDragStart={(e) => setActiveDragId(e.active.id.toString())} onDragEnd={handleDragEnd}>
+      <TooltipProvider>
+        <div className="flex h-screen bg-background overflow-hidden font-sans">
         <Toaster position="top-right" />
+
+        <AnimatePresence>
+          {activeDragId && (
+            <motion.div
+              initial={{ x: 300, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 300, opacity: 0 }}
+              className="fixed right-6 top-24 bottom-24 w-80 z-50 glass-panel border-l shadow-2xl p-6 flex flex-col gap-6"
+            >
+              <div className="flex items-center gap-2 border-b pb-4">
+                <MapIcon size={20} className="text-amber-500" />
+                <div>
+                  <h3 className="text-sm font-bold">Categorize in Memory</h3>
+                  <p className="text-[10px] text-muted-foreground">Drop result into a chamber</p>
+                </div>
+              </div>
+              <ScrollArea className="flex-1 pr-4">
+                <div className="space-y-3">
+                  {memoryPalace.map(m => (
+                    <DroppableRoom 
+                      key={m.id} 
+                      id={`room-${m.id}`} 
+                      room={m.room} 
+                      concept={m.concept} 
+                      memories={m.memories} 
+                      isDragging={!!activeDragId}
+                    />
+                  ))}
+                </div>
+              </ScrollArea>
+              <div className="pt-4 border-t text-[9px] text-muted-foreground italic text-center">
+                Milla Jovovich Protocol Active
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
         
         {/* Sidebar */}
         <aside className="w-64 border-r bg-muted/30 flex flex-col hidden md:flex">
@@ -596,27 +732,109 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   className="space-y-6"
                 >
-                  {isIdle && (
-                    <Card className="border-green-500/50 bg-green-500/5 animate-pulse">
-                      <CardHeader className="pb-2">
-                        <CardTitle className="text-sm flex items-center gap-2 text-green-500">
-                          <Activity size={16} />
-                          Idle-Time Optimization Active
-                        </CardTitle>
-                        <CardDescription>System is currently performing background maintenance.</CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
-                        {idleTasks.map(t => (
-                          <div key={t.id} className="space-y-1">
-                            <div className="flex justify-between text-[10px] font-mono">
-                              <span>{t.task}</span>
-                              <span>{t.progress}%</span>
+                  {activeTab === "system" && (
+                    <div className="space-y-4">
+                      <Card className="border-blue-500/20 bg-blue-500/5">
+                        <CardHeader className="py-3">
+                          <CardTitle className="text-xs flex items-center gap-2">
+                            <Globe size={14} className="text-blue-500" />
+                            Autonomous Internet Access
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent className="py-0 pb-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] text-muted-foreground">Allow engine to fetch live research and data.</p>
+                            <Switch checked={internetSearch} onCheckedChange={setInternetSearch} />
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      <Card className="border-pink-500/20 bg-pink-500/5">
+                        <CardHeader className="py-3">
+                          <CardTitle className="text-xs flex items-center gap-2">
+                            <BrainCircuit size={14} className="text-pink-500" />
+                            Self-Evolution Protocol
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent className="py-0 pb-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] text-muted-foreground">Enable autonomous feature generation and optimization.</p>
+                            <Switch checked={true} />
+                          </div>
+                          <div className="p-2 rounded bg-pink-500/10 border border-pink-500/20">
+                            <p className="text-[9px] font-mono text-pink-300">STATUS: ANALYZING USER PATTERNS...</p>
+                            <p className="text-[9px] font-mono text-pink-300">NEXT EVOLUTION: T-MINUS 3 INTERACTIONS</p>
+                          </div>
+                        </CardContent>
+                      </Card>
+                      <Card className="border-green-500/20 bg-green-500/5">
+                        <CardHeader className="py-3">
+                          <CardTitle className="text-xs flex items-center gap-2">
+                            <Zap size={14} className="text-green-500" />
+                            Research & Efficiency Optimizer
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent className="py-0 pb-3 space-y-3">
+                          <p className="text-[10px] text-muted-foreground">Self-engineering to reduce resource footprint while maintaining performance.</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="p-2 rounded bg-background/50 border text-center">
+                              <p className="text-[8px] text-muted-foreground uppercase">Quantization</p>
+                              <p className="text-xs font-bold text-green-500">INT4 (Active)</p>
                             </div>
-                            <div className="h-1 w-full bg-muted rounded-full overflow-hidden">
-                              <div className="h-full bg-green-500" style={{ width: `${t.progress}%` }}></div>
+                            <div className="p-2 rounded bg-background/50 border text-center">
+                              <p className="text-[8px] text-muted-foreground uppercase">Context Pruning</p>
+                              <p className="text-xs font-bold text-green-500">-25% RAM</p>
                             </div>
                           </div>
-                        ))}
+                          <div className="flex items-center gap-2 text-[9px] text-muted-foreground italic">
+                            <CheckCircle2 size={10} className="text-green-500" />
+                            Applied latest research on Sparse Attention mechanisms.
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </div>
+                  )}
+
+                  {window.electronAPI && (
+                    <Card className="border-blue-500/20 bg-blue-500/5">
+                      <CardHeader>
+                        <CardTitle className="text-sm flex items-center gap-2">
+                          <Terminal size={16} className="text-blue-500" />
+                          Local System Integration
+                        </CardTitle>
+                        <CardDescription>Execute commands directly on your Windows host.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="flex gap-2">
+                          <Input 
+                            placeholder="e.g., start notepad.exe or dir" 
+                            className="h-9 text-xs font-mono"
+                            onKeyDown={async (e) => {
+                              if (e.key === 'Enter') {
+                                const cmd = e.currentTarget.value;
+                                e.currentTarget.value = '';
+                                toast.info(`Executing: ${cmd}`);
+                                const res = await window.electronAPI.runLocalCommand(cmd);
+                                if (res.success) {
+                                  toast.success("Command Executed", { description: res.output.slice(0, 100) });
+                                } else {
+                                  toast.error("Command Failed", { description: res.error });
+                                }
+                              }
+                            }}
+                          />
+                          <Button size="sm" variant="secondary">Run</Button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="p-3 rounded-lg border bg-background/50 space-y-1">
+                            <p className="text-[10px] uppercase text-muted-foreground font-bold">CPU Temp</p>
+                            <p className="text-xl font-mono font-bold text-orange-500">{systemStatus.temp || '--'}Â°C</p>
+                          </div>
+                          <div className="p-3 rounded-lg border bg-background/50 space-y-1">
+                            <p className="text-[10px] uppercase text-muted-foreground font-bold">Host OS</p>
+                            <p className="text-xs font-medium">Windows 11 (Local)</p>
+                          </div>
+                        </div>
                       </CardContent>
                     </Card>
                   )}
@@ -889,7 +1107,18 @@ export default function App() {
                             {s.code}
                           </div>
                           <div className="flex gap-2">
-                            <Button size="sm" className="flex-1 bg-pink-600 hover:bg-pink-700 text-white text-xs h-8">
+                            <Button 
+                              size="sm" 
+                              className="flex-1 bg-pink-600 hover:bg-pink-700 text-white text-xs h-8"
+                              onClick={async () => {
+                                if (window.electronAPI) {
+                                  const path = await window.electronAPI.saveLocalData(`evolution_${s.id}.json`, s);
+                                  toast.success("Evolution Applied", { description: `Configuration saved to: ${path}` });
+                                } else {
+                                  toast.success("Evolution Applied (Simulated)");
+                                }
+                              }}
+                            >
                               Approve & Update
                             </Button>
                             <Button size="sm" variant="outline" className="text-xs h-8">Reject</Button>
@@ -918,21 +1147,14 @@ export default function App() {
                     <CardContent className="space-y-4">
                       <div className="grid grid-cols-1 gap-3">
                         {memoryPalace.map(m => (
-                          <div key={m.id} className="p-4 rounded-lg border bg-muted/20 flex items-center justify-between group hover:border-amber-500/50 transition-colors cursor-pointer">
-                            <div className="flex items-center gap-4">
-                              <div className="w-10 h-10 rounded bg-amber-500/10 flex items-center justify-center text-amber-500">
-                                <MapIcon size={20} />
-                              </div>
-                              <div>
-                                <p className="text-sm font-bold">{m.room}</p>
-                                <p className="text-[10px] text-muted-foreground uppercase tracking-widest">{m.concept}</p>
-                              </div>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-xs font-mono font-bold text-amber-500">{m.memories}</p>
-                              <p className="text-[9px] text-muted-foreground uppercase">Nodes</p>
-                            </div>
-                          </div>
+                          <DroppableRoom 
+                            key={m.id} 
+                            id={`room-${m.id}`} 
+                            room={m.room} 
+                            concept={m.concept} 
+                            memories={m.memories} 
+                            isDragging={!!activeDragId}
+                          />
                         ))}
                       </div>
                       <Button variant="outline" className="w-full border-dashed gap-2 text-xs h-10">
@@ -1019,9 +1241,78 @@ export default function App() {
                           />
                         </div>
                       </div>
-                      <Button className="w-full bg-purple-600 hover:bg-purple-700 text-white gap-2">
-                        <Activity size={16} />
-                        Launch Training Job
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs">Dataset Preview</Label>
+                          <Badge variant="outline" className="text-[10px] h-4">3 Samples</Badge>
+                        </div>
+                        <div className="bg-black/40 rounded-lg border border-purple-500/10 overflow-hidden">
+                          <div className="max-h-[120px] overflow-y-auto p-2 space-y-2">
+                            {datasetPreview.map((item, i) => (
+                              <div key={i} className="text-[10px] p-2 rounded bg-purple-500/5 border border-purple-500/5">
+                                <p className="text-purple-400 font-bold mb-1">Q: {item.prompt}</p>
+                                <p className="text-muted-foreground">A: {item.completion}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      {isTraining && (
+                        <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                          <div className="flex justify-between text-[10px] font-mono">
+                            <span className="flex items-center gap-1">
+                              <Loader2 size={10} className="animate-spin" />
+                              Training in progress...
+                            </span>
+                            <span>{trainingProgress}%</span>
+                          </div>
+                          <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                            <motion.div 
+                              className="h-full bg-purple-500" 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${trainingProgress}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <Button 
+                        className="w-full bg-purple-600 hover:bg-purple-700 text-white gap-2"
+                        disabled={isTraining}
+                        onClick={async () => {
+                          setIsTraining(true);
+                          setTrainingProgress(0);
+                          
+                          if (window.electronAPI) {
+                            await window.electronAPI.saveLocalData(`finetune_${Date.now()}.json`, fineTuneConfig);
+                          }
+
+                          // Simulate training progress
+                          const interval = setInterval(() => {
+                            setTrainingProgress(prev => {
+                              if (prev >= 100) {
+                                clearInterval(interval);
+                                setIsTraining(false);
+                                toast.success("Training Complete", { description: "Model weights have been updated and deployed." });
+                                return 100;
+                              }
+                              return prev + 5;
+                            });
+                          }, 300);
+                        }}
+                      >
+                        {isTraining ? (
+                          <>
+                            <Loader2 size={16} className="animate-spin" />
+                            Optimizing Weights...
+                          </>
+                        ) : (
+                          <>
+                            <Activity size={16} />
+                            Launch Training Job
+                          </>
+                        )}
                       </Button>
                     </CardContent>
                   </Card>
@@ -1040,15 +1331,16 @@ export default function App() {
                 </div>
               )}
 
-              <AnimatePresence mode="popLayout">
-                {results.map((res, idx) => (
-                  <motion.div
-                    key={idx}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.4, ease: "easeOut" }}
-                  >
-                    <Card className="overflow-hidden border-border/50 shadow-sm hover:shadow-md transition-shadow">
+                  <AnimatePresence mode="popLayout">
+                    {results.map((res, idx) => (
+                      <motion.div
+                        key={idx}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.4, ease: "easeOut" }}
+                      >
+                        <DraggableResult id={`result-${idx}`}>
+                          <Card className="overflow-hidden border-border/50 shadow-sm hover:shadow-md transition-shadow">
                       <CardHeader className="py-3 px-4 bg-muted/30 flex flex-row items-center justify-between border-b">
                         <div className="flex items-center gap-2">
                           <Badge variant="outline" className="font-mono text-[10px] uppercase">
@@ -1142,10 +1434,11 @@ export default function App() {
                           </div>
                         )}
                       </CardContent>
-                    </Card>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
+                        </Card>
+                      </DraggableResult>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
 
               {isGenerating && (
                 <motion.div 
@@ -1290,5 +1583,6 @@ export default function App() {
         </main>
       </div>
     </TooltipProvider>
+    </DndContext>
   );
 }
