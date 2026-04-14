@@ -1,0 +1,6 @@
+{
+  "name": "OmniSandbox AI",
+  "description": "A high-performance LLM sandbox for multi-model orchestration, prompt engineering, and multi-modal generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
